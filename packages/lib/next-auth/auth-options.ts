@@ -1,266 +1,32 @@
 /// <reference types="../types/next-auth.d.ts" />
 import { PrismaAdapter } from '@next-auth/prisma-adapter';
-import { compare } from '@node-rs/bcrypt';
-import { verifyAuthenticationResponse } from '@simplewebauthn/server';
 import { DateTime } from 'luxon';
-import type { AuthOptions, Session, User } from 'next-auth';
+import type { AuthOptions, Session } from 'next-auth';
 import type { JWT } from 'next-auth/jwt';
-import CredentialsProvider from 'next-auth/providers/credentials';
-import type { GoogleProfile } from 'next-auth/providers/google';
-import GoogleProvider from 'next-auth/providers/google';
-import { env } from 'next-runtime-env';
+import KeycloakProvider from 'next-auth/providers/keycloak';
 
 import { prisma } from '@documenso/prisma';
-import { IdentityProvider, UserSecurityAuditLogType } from '@documenso/prisma/client';
+import { IdentityProvider } from '@documenso/prisma/client';
 
-import { AppError, AppErrorCode } from '../errors/app-error';
-import { isTwoFactorAuthenticationEnabled } from '../server-only/2fa/is-2fa-availble';
-import { validateTwoFactorAuthentication } from '../server-only/2fa/validate-2fa';
-import { getMostRecentVerificationTokenByUserId } from '../server-only/user/get-most-recent-verification-token-by-user-id';
-import { getUserByEmail } from '../server-only/user/get-user-by-email';
-import { sendConfirmationToken } from '../server-only/user/send-confirmation-token';
-import type { TAuthenticationResponseJSONSchema } from '../types/webauthn';
-import { ZAuthenticationResponseJSONSchema } from '../types/webauthn';
-import { extractNextAuthRequestMetadata } from '../universal/extract-request-metadata';
-import { getAuthenticatorOptions } from '../utils/authenticator';
-import { ErrorCode } from './error-codes';
+const adapter = PrismaAdapter(prisma);
+const _linkAccount = adapter.linkAccount;
+adapter.linkAccount = async (account) => {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const { 'not-before-policy': _, refresh_expires_in, ...data } = account;
+  return _linkAccount(data);
+};
 
 export const NEXT_AUTH_OPTIONS: AuthOptions = {
-  adapter: PrismaAdapter(prisma),
+  adapter: adapter,
   secret: process.env.NEXTAUTH_SECRET ?? 'secret',
   session: {
     strategy: 'jwt',
   },
   providers: [
-    CredentialsProvider({
-      name: 'Credentials',
-      credentials: {
-        email: { label: 'Email', type: 'email' },
-        password: { label: 'Password', type: 'password' },
-        totpCode: {
-          label: 'Two-factor Code',
-          type: 'input',
-          placeholder: 'Code from authenticator app',
-        },
-        backupCode: { label: 'Backup Code', type: 'input', placeholder: 'Two-factor backup code' },
-      },
-      authorize: async (credentials, req) => {
-        if (!credentials) {
-          throw new Error(ErrorCode.CREDENTIALS_NOT_FOUND);
-        }
-
-        const { email, password, backupCode, totpCode } = credentials;
-
-        const user = await getUserByEmail({ email }).catch(() => {
-          throw new Error(ErrorCode.INCORRECT_EMAIL_PASSWORD);
-        });
-
-        if (!user.password) {
-          throw new Error(ErrorCode.USER_MISSING_PASSWORD);
-        }
-
-        const isPasswordsSame = await compare(password, user.password);
-        const requestMetadata = extractNextAuthRequestMetadata(req);
-
-        if (!isPasswordsSame) {
-          await prisma.userSecurityAuditLog.create({
-            data: {
-              userId: user.id,
-              ipAddress: requestMetadata.ipAddress,
-              userAgent: requestMetadata.userAgent,
-              type: UserSecurityAuditLogType.SIGN_IN_FAIL,
-            },
-          });
-
-          throw new Error(ErrorCode.INCORRECT_EMAIL_PASSWORD);
-        }
-
-        const is2faEnabled = isTwoFactorAuthenticationEnabled({ user });
-
-        if (is2faEnabled) {
-          const isValid = await validateTwoFactorAuthentication({ backupCode, totpCode, user });
-
-          if (!isValid) {
-            await prisma.userSecurityAuditLog.create({
-              data: {
-                userId: user.id,
-                ipAddress: requestMetadata.ipAddress,
-                userAgent: requestMetadata.userAgent,
-                type: UserSecurityAuditLogType.SIGN_IN_2FA_FAIL,
-              },
-            });
-
-            throw new Error(
-              totpCode
-                ? ErrorCode.INCORRECT_TWO_FACTOR_CODE
-                : ErrorCode.INCORRECT_TWO_FACTOR_BACKUP_CODE,
-            );
-          }
-        }
-
-        if (!user.emailVerified) {
-          const mostRecentToken = await getMostRecentVerificationTokenByUserId({
-            userId: user.id,
-          });
-
-          if (
-            !mostRecentToken ||
-            mostRecentToken.expires.valueOf() <= Date.now() ||
-            DateTime.fromJSDate(mostRecentToken.createdAt).diffNow('minutes').minutes > -5
-          ) {
-            await sendConfirmationToken({ email });
-          }
-
-          throw new Error(ErrorCode.UNVERIFIED_EMAIL);
-        }
-
-        return {
-          id: Number(user.id),
-          email: user.email,
-          name: user.name,
-          emailVerified: user.emailVerified?.toISOString() ?? null,
-        } satisfies User;
-      },
-    }),
-    GoogleProvider<GoogleProfile>({
-      clientId: process.env.NEXT_PRIVATE_GOOGLE_CLIENT_ID ?? '',
-      clientSecret: process.env.NEXT_PRIVATE_GOOGLE_CLIENT_SECRET ?? '',
-      allowDangerousEmailAccountLinking: true,
-
-      profile(profile) {
-        return {
-          id: Number(profile.sub),
-          name: profile.name || `${profile.given_name} ${profile.family_name}`.trim(),
-          email: profile.email,
-          emailVerified: profile.email_verified ? new Date().toISOString() : null,
-        };
-      },
-    }),
-    {
-      id: 'oidc',
-      name: 'OIDC',
-      wellKnown: process.env.NEXT_PRIVATE_OIDC_WELL_KNOWN,
-      clientId: process.env.NEXT_PRIVATE_OIDC_CLIENT_ID,
-      clientSecret: process.env.NEXT_PRIVATE_OIDC_CLIENT_SECRET,
-      authorization: { params: { scope: 'openid email profile' } },
-      idToken: true,
-      checks: ['pkce', 'state'],
-      type: 'oauth',
-      allowDangerousEmailAccountLinking: true,
-      profile(profile) {
-        return {
-          id: Number(profile.sub),
-          email: profile.email,
-          name: profile.name || `${profile.given_name} ${profile.family_name}`.trim(),
-        };
-      },
-    },
-    CredentialsProvider({
-      id: 'webauthn',
-      name: 'Keypass',
-      credentials: {
-        csrfToken: { label: 'csrfToken', type: 'csrfToken' },
-      },
-      async authorize(credentials, req) {
-        const csrfToken = credentials?.csrfToken;
-
-        if (typeof csrfToken !== 'string' || csrfToken.length === 0) {
-          throw new AppError(AppErrorCode.INVALID_REQUEST);
-        }
-
-        let requestBodyCrediential: TAuthenticationResponseJSONSchema | null = null;
-
-        try {
-          const parsedBodyCredential = JSON.parse(req.body?.credential);
-          requestBodyCrediential = ZAuthenticationResponseJSONSchema.parse(parsedBodyCredential);
-        } catch {
-          throw new AppError(AppErrorCode.INVALID_REQUEST);
-        }
-
-        const challengeToken = await prisma.anonymousVerificationToken
-          .delete({
-            where: {
-              id: csrfToken,
-            },
-          })
-          .catch(() => null);
-
-        if (!challengeToken) {
-          return null;
-        }
-
-        if (challengeToken.expiresAt < new Date()) {
-          throw new AppError(AppErrorCode.EXPIRED_CODE);
-        }
-
-        const passkey = await prisma.passkey.findFirst({
-          where: {
-            credentialId: Buffer.from(requestBodyCrediential.id, 'base64'),
-          },
-          include: {
-            User: {
-              select: {
-                id: true,
-                email: true,
-                name: true,
-                emailVerified: true,
-              },
-            },
-          },
-        });
-
-        if (!passkey) {
-          throw new AppError(AppErrorCode.NOT_SETUP);
-        }
-
-        const user = passkey.User;
-
-        const { rpId, origin } = getAuthenticatorOptions();
-
-        const verification = await verifyAuthenticationResponse({
-          response: requestBodyCrediential,
-          expectedChallenge: challengeToken.token,
-          expectedOrigin: origin,
-          expectedRPID: rpId,
-          authenticator: {
-            credentialID: new Uint8Array(Array.from(passkey.credentialId)),
-            credentialPublicKey: new Uint8Array(passkey.credentialPublicKey),
-            counter: Number(passkey.counter),
-          },
-        }).catch(() => null);
-
-        const requestMetadata = extractNextAuthRequestMetadata(req);
-
-        if (!verification?.verified) {
-          await prisma.userSecurityAuditLog.create({
-            data: {
-              userId: user.id,
-              ipAddress: requestMetadata.ipAddress,
-              userAgent: requestMetadata.userAgent,
-              type: UserSecurityAuditLogType.SIGN_IN_PASSKEY_FAIL,
-            },
-          });
-
-          return null;
-        }
-
-        await prisma.passkey.update({
-          where: {
-            id: passkey.id,
-          },
-          data: {
-            lastUsedAt: new Date(),
-            counter: verification.authenticationInfo.newCounter,
-          },
-        });
-
-        return {
-          id: Number(user.id),
-          email: user.email,
-          name: user.name,
-          emailVerified: user.emailVerified?.toISOString() ?? null,
-        } satisfies User;
-      },
+    KeycloakProvider({
+      clientId: process.env.NEXT_PRIVATE_OIDC_CLIENT_ID || '',
+      clientSecret: process.env.NEXT_PRIVATE_OIDC_CLIENT_SECRET || '',
+      issuer: process.env.NEXT_PRIVATE_OIDC_WELL_KNOWN,
     }),
   ],
   callbacks: {
@@ -274,7 +40,7 @@ export const NEXT_AUTH_OPTIONS: AuthOptions = {
       if (!merged.email || typeof merged.emailVerified !== 'string') {
         const userId = Number(merged.id ?? token.sub);
 
-        const retrieved = await prisma.user.findFirst({
+        let retrieved = await prisma.user.findFirst({
           where: {
             id: userId,
           },
@@ -282,6 +48,17 @@ export const NEXT_AUTH_OPTIONS: AuthOptions = {
 
         if (!retrieved) {
           return token;
+        }
+
+        if (!retrieved.emailVerified) {
+          retrieved = await prisma.user.update({
+            where: {
+              id: userId,
+            },
+            data: {
+              emailVerified: new Date(),
+            },
+          });
         }
 
         merged.id = retrieved.id;
@@ -350,14 +127,14 @@ export const NEXT_AUTH_OPTIONS: AuthOptions = {
       return session;
     },
 
-    async signIn({ user }) {
+    signIn({ user }) {
       // We do this to stop OAuth providers from creating an account
       // when signups are disabled
-      if (env('NEXT_PUBLIC_DISABLE_SIGNUP') === 'true') {
-        const userData = await getUserByEmail({ email: user.email! });
-
-        return !!userData;
-      }
+      // if (env('NEXT_PUBLIC_DISABLE_SIGNUP') === 'true') {
+      //   const userData = await getUserByEmail({ email: user.email! });
+      //
+      //   return !!userData;
+      // }
 
       return true;
     },
