@@ -129,7 +129,7 @@ export const SignUpForm = ({
 
   const onSignUpWithOIDCClick = async () => {
     try {
-      await signIn('oidc', { callbackUrl: SIGN_UP_REDIRECT_PATH });
+      await signIn('keycloak', { callbackUrl: SIGN_UP_REDIRECT_PATH });
     } catch (err) {
       toast({
         title: 'An unknown error occurred',
@@ -258,7 +258,7 @@ export const SignUpForm = ({
               onClick={onSignUpWithOIDCClick}
             >
               <FcGoogle className="mr-2 h-5 w-5" />
-              Sign Up with OIDC
+              Sign Up with Keycloak
             </Button>
           </>
         )}

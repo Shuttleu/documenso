@@ -15,7 +15,6 @@ import { findPasskeys } from '@documenso/lib/server-only/auth/find-passkeys';
 import { compareSync } from '@documenso/lib/server-only/auth/hash';
 import { updatePasskey } from '@documenso/lib/server-only/auth/update-passkey';
 import { createUser } from '@documenso/lib/server-only/user/create-user';
-import { sendConfirmationToken } from '@documenso/lib/server-only/user/send-confirmation-token';
 import { extractNextApiRequestMetadata } from '@documenso/lib/universal/extract-request-metadata';
 
 import { authenticatedProcedure, procedure, router } from '../trpc';
@@ -34,12 +33,12 @@ const NEXT_PUBLIC_DISABLE_SIGNUP = () => env('NEXT_PUBLIC_DISABLE_SIGNUP');
 export const authRouter = router({
   signup: procedure.input(ZSignUpMutationSchema).mutation(async ({ input }) => {
     try {
-      if (NEXT_PUBLIC_DISABLE_SIGNUP() === 'true') {
-        throw new TRPCError({
-          code: 'BAD_REQUEST',
-          message: 'Signups are disabled.',
-        });
-      }
+      // if (NEXT_PUBLIC_DISABLE_SIGNUP() === 'true') {
+      //   throw new TRPCError({
+      //     code: 'BAD_REQUEST',
+      //     message: 'Signups are disabled.',
+      //   });
+      // }
 
       const { name, email, password, signature, url } = input;
 
@@ -52,7 +51,7 @@ export const authRouter = router({
 
       const user = await createUser({ name, email, password, signature, url });
 
-      await sendConfirmationToken({ email: user.email });
+      // await sendConfirmationToken({ email: user.email });
 
       return user;
     } catch (err) {
