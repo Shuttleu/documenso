@@ -26,8 +26,18 @@ import { extractNextAuthRequestMetadata } from '../universal/extract-request-met
 import { getAuthenticatorOptions } from '../utils/authenticator';
 import { ErrorCode } from './error-codes';
 
+const adapter = PrismaAdapter(prisma);
+const _linkAccount = adapter.linkAccount;
+adapter.linkAccount = (account) => {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const { 'not-before-policy': _, refresh_expires_in, ...data } = account;
+  if (_linkAccount) {
+    return _linkAccount(data);
+  }
+};
+
 export const NEXT_AUTH_OPTIONS: AuthOptions = {
-  adapter: PrismaAdapter(prisma),
+  adapter: adapter,
   secret: process.env.NEXTAUTH_SECRET ?? 'secret',
   session: {
     strategy: 'jwt',
